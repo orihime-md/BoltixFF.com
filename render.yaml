@@ -1,0 +1,54 @@
+# Render Blueprint for Free Fire Hub. Dashboard -> New -> Blueprint -> pick this repo.
+# Keys marked sync: false are typed into Render's Environment tab, never stored in this file.
+services:
+  - type: web
+    name: boltix-freefire-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+
+      # ---- Telegram ----
+      - key: BOT_TOKEN              # from @BotFather
+        sync: false
+      - key: BOT_NAME
+        value: 𝕭𝖔𝖑𝖙𝖎𝖝 𝕱𝕱
+      - key: REQUIRE_JOIN           # true = users must join both channels first
+        value: "true"
+
+      # ---- AI: Gemini (main), Agnes (fallback) ----
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: AGNES_API_KEY
+        sync: false
+      - key: AGNES_URL
+        value: https://apihub.agnes-ai.com/v1/chat/completions
+      - key: AGNES_MODEL
+        value: agnes-2.5-flash
+
+      # ---- Sensitivity web search (optional, Serper.dev). Without it the AI uses its own knowledge. ----
+      - key: SERPER_API_KEY
+        sync: false
+
+      # ---- Free Fire UID lookup ----
+      - key: FF_API_URL_TEMPLATE    # free-ff-api (GitHub: Matrixmor/free-ff-api), third-party host
+        value: https://free-ff-api-src-5plp.onrender.com/api/v1/account?region={region}&uid={uid}
+      - key: FF_REGION
+        value: IND
+      - key: FF_API_KEY             # only if your lookup provider needs a key
+        sync: false
+      - key: FF_API_KEY_HEADER
+        value: x-api-key
+
+      # ---- Databases: add these yourself in Render's Environment tab.
+      # This file does not create any database.
+      - key: DATABASE_URL_MAIN
+        sync: false
+      - key: DATABASE_URL_BACKUP
+        sync: false
