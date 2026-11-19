@@ -1,0 +1,78 @@
+# Render Blueprint for Free Fire Hub. Dashboard -> New -> Blueprint -> pick this repo.
+# Keys marked sync: false are typed into Render's Environment tab, never stored in this file.
+services:
+  - type: web
+    name: boltix-freefire-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    envVars:
+      # ---- Owner and limits ----
+      - key: OWNER_USERNAME         # no @ sign; exempt from the daily card limit
+        value: dev_light01
+      - key: OWNER_ID               # optional numeric Telegram ID (more reliable than username)
+        sync: false
+      - key: CARD_DAILY_LIMIT       # HUD and sensitivity cards per user per day
+        value: "5"
+      - key: BOT_TIMEZONE           # used for the daily reset and the rest period
+        value: Africa/Lagos
+      - key: REST_START_HOUR        # keep-alive pings stop at 21:00 (9pm)
+        value: "21"
+      - key: REST_END_HOUR          # and resume at 05:00 (5am)
+        value: "5"
+      # ---- Main service and helper services (card drawing) ----
+      - key: MAIN_URL
+        value: https://boltix-freefire-bot.onrender.com
+      - key: HELPER_MODE            # keep false on the main bot; true on each helper service
+        value: "false"
+      - key: HELPER_URLS            # comma-separated helper URLs, e.g. https://boltix-helper-1.onrender.com,https://boltix-helper-2.onrender.com
+        sync: false
+      - key: HELPER_SECRET          # same value on the main bot and every helper
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.12.8
+
+      # ---- Telegram ----
+      - key: BOT_TOKEN              # from @BotFather
+        sync: false
+      - key: BOT_NAME
+        value: 𝕭𝖔𝖑𝖙𝖎𝖝 𝕱𝕱
+      - key: REQUIRE_JOIN           # true = users must join both channels first
+        value: "true"
+
+      # ---- AI: Gemini (main), Agnes (fallback) ----
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: AGNES_API_KEY
+        sync: false
+      - key: AGNES_URL
+        value: https://apihub.agnes-ai.com/v1/chat/completions
+      - key: AGNES_MODEL
+        value: agnes-2.5-flash
+
+      # ---- Sensitivity web search (optional, Serper.dev). Without it the AI uses its own knowledge. ----
+      - key: SERPER_API_KEY
+        sync: false
+
+      # ---- Free Fire UID lookup ----
+      - key: FF_API_URL_TEMPLATE    # SiamBhau Free Fire Info (free group). {uid}, {region}, {key} are filled in at runtime
+        value: http://siambhau69.eu.cc/freefireinfo/bhau?uid={uid}&region={region}&key={key}
+      - key: FF_REGION              # ME worked for the test account
+        value: ME
+      - key: BAN_API_URL_TEMPLATE   # SiamBhau ban check, 1 per user per day
+        value: http://siambhau69.eu.cc/bancheck/bancheck?uid={uid}&key={key}
+      - key: FF_API_KEY             # your SiamBhau free key, entered in Render (never in this file)
+        sync: false
+      - key: FF_API_KEY_HEADER
+        value: x-api-key
+
+      # ---- Databases: add these yourself in Render's Environment tab.
+      # This file does not create any database.
+      - key: DATABASE_URL_MAIN
+        sync: false
+      - key: DATABASE_URL_BACKUP
+        sync: false
