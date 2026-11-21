@@ -1,0 +1,99 @@
+# Render Blueprint for the Boltix ff MAIN bot (new Render account).
+# Dashboard -> New -> Blueprint -> pick this repo.
+# This creates the database and the service. Keys marked "sync: false" are typed in Render's
+# Environment tab after the first deploy, so secrets never live in this file.
+databases:
+  - name: boltix-main-db
+    databaseName: boltix_main
+    user: boltix
+    plan: free          # free Postgres expires after 30 days unless upgraded
+    region: frankfurt   # the service below must use the same region
+
+services:
+  - type: web
+    name: boltix-ff-main
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+
+      # ---- Database (created above, filled automatically) ----
+      - key: DATABASE_URL_MAIN
+        fromDatabase:
+          name: boltix-main-db
+          property: connectionString
+
+      # ---- Telegram ----
+      - key: BOT_TOKEN                # YOU ENTER: main Boltix bot token from @BotFather
+        sync: false
+      - key: BOT_NAME
+        value: 𝕭𝖔𝖑𝖙𝖎𝖝 𝕱𝕱
+      - key: REQUIRE_JOIN             # users must join the channels first
+        value: "true"
+      - key: OWNER_USERNAME           # no @ sign; exempt from the daily card limit
+        value: dev_light01
+      - key: OWNER_ID                 # YOU ENTER: your numeric Telegram ID (more reliable than username)
+        sync: false
+
+      # ---- Top-up shop: Paystack takes payment, GSUBZ delivers diamonds ----
+      - key: PAYSTACK_SECRET_KEY      # YOU ENTER: from your Paystack dashboard
+        sync: false
+      - key: GSUBZ_API_KEY            # YOU ENTER: from your GSUBZ dashboard
+        sync: false
+      - key: GSUBZ_BASE_URL
+        value: https://api.gsubz.com
+      - key: GSUBZ_GAME_ID
+        value: "12"
+      - key: GSUBZ_LINE_KEYWORD
+        value: Mena
+
+      # ---- AI: Gemini (main), Agnes (fallback) ----
+      - key: GEMINI_API_KEY           # YOU ENTER: Google Gemini key
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: AGNES_API_KEY            # YOU ENTER: Agnes key
+        sync: false
+      - key: AGNES_URL
+        value: https://apihub.agnes-ai.com/v1/chat/completions
+      - key: AGNES_MODEL
+        value: agnes-2.5-flash
+      - key: SERPER_API_KEY           # YOU ENTER (optional): Serper.dev key for sensitivity web search
+        sync: false
+
+      # ---- Free Fire UID lookup and ban check ----
+      - key: API_QUOTA
+        value: "500"
+      - key: FF_API_URL_TEMPLATE
+        value: http://siambhau69.eu.cc/freefireinfo/bhau?uid={uid}&region={region}&key={key}
+      - key: FF_REGION
+        value: ME
+      - key: BAN_API_URL_TEMPLATE
+        value: http://siambhau69.eu.cc/bancheck/bancheck?uid={uid}&key={key}
+      - key: FF_API_KEY               # YOU ENTER: your SiamBhau free key
+        sync: false
+      - key: FF_API_KEY_HEADER
+        value: x-api-key
+
+      # ---- Limits and schedule ----
+      - key: CARD_DAILY_LIMIT
+        value: "5"
+      - key: BOT_TIMEZONE
+        value: Africa/Lagos
+      - key: REST_START_HOUR          # keep-alive pings stop at 21:00
+        value: "21"
+      - key: REST_END_HOUR            # and resume at 05:00
+        value: "5"
+
+      # ---- Helper services (card drawing). The main bot only sends work to them. ----
+      - key: HELPER_MODE
+        value: "false"
+      - key: HELPER_URLS              # YOU ENTER: comma-separated helper URLs, e.g. https://helper-1.onrender.com,https://helper-2.onrender.com (leave empty if you have none)
+        sync: false
+      - key: HELPER_SECRET            # YOU ENTER: any long random string, the same value on every helper
+        sync: false
