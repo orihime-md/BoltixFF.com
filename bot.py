@@ -18,6 +18,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -35,7 +36,6 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InputMediaPhoto,
     Message,
-    Update,
 )
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
@@ -61,7 +61,11 @@ def _env(name, default=""):
 
 BOT_TOKEN = _env("BOT_TOKEN")
 BOT_NAME = _env("BOT_NAME", "Free Fire Hub")
-WIDGET_MENU = _env("WIDGET_MENU", "true").lower() == "true"  # full-width HTML widget menu in private chats
+# Use Telegram Rich Messages (Bot API 10.1+; attached media support added in 10.2).
+# Rich Messages have no width parameter: Telegram clients still choose the bubble width.
+# Set false to return to legacy photo captions.
+RICH_MESSAGES_ENABLED = _env("RICH_MESSAGES_ENABLED", "true").lower() == "true"
+_RICH_API_UNAVAILABLE = False  # set when Telegram explicitly reports an unknown method
 BRAND = "Boltix Labs"
 REQUIRE_JOIN = _env("REQUIRE_JOIN", "true").lower() == "true"
 
@@ -1019,153 +1023,6 @@ def menu(name):
     )
 
 
-# ======================================================================
-# WIDGET MENU (Bot API 10.4 sendWidget): full message-bubble width, coloured buttons
-# ======================================================================
-
-# (action, label, colour, full_width). Rows: UID full, Weapon+Sensi, AI full, Ban+HUD, Top Up full.
-WIDGET_BUTTONS = [
-    ("uid", "🔍 UID LOOKUP", "p", True),
-    ("weapon", "🔫 WEAPON MATCH", "g", False),
-    ("sensi", "🎯 SENSITIVITY", "g", False),
-    ("ai", "🧠 AI ADVISOR", "p", True),
-    ("ban", "🚫 BAN CHECK", "r", False),
-    ("hud", "🧬 GENERATE HUD", "p", False),
-]
-
-
-def widget_menu_html(name):
-    """Self-contained widget: no width set, so it fills the message bubble. Buttons call the bot."""
-    buttons = []
-    for action, label, colour, full in WIDGET_BUTTONS:
-        cls = f"{colour} full" if full else colour
-        buttons.append(f'<button class="{cls}" data-a="{action}">{html.escape(label)}</button>')
-    if not SUB_BOT_ID:
-        buttons.append('<button class="y full" data-a="topup">💎 TOP UP</button>')
-    body = "\n".join(buttons)
-    return f"""<!doctype html>
-<html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-* {{ box-sizing: border-box; }}
-body {{ margin: 0; padding: 8px; background: transparent; color: #f2f2f2;
-        font-family: system-ui, -apple-system, sans-serif; }}
-.panel {{ border-radius: 18px; padding: 14px; background: #26272d; }}
-h1 {{ margin: 0 0 2px; font-size: 20px; }}
-.sub {{ margin: 0 0 12px; font-size: 13px; opacity: .75; font-style: italic; }}
-.grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }}
-.full {{ grid-column: 1 / -1; }}
-button {{ width: 100%; border: 0; border-radius: 14px; padding: 15px 10px; color: #fff;
-          font-size: 15px; font-weight: 700; }}
-.p {{ background: #7c5cff; }}
-.g {{ background: #2fa15a; }}
-.r {{ background: #d6404f; }}
-.y {{ background: #e0a526; }}
-.note {{ min-height: 16px; margin: 10px 0 0; font-size: 12px; opacity: .7; }}
-</style></head>
-<body>
-<div class="panel">
-  <h1>🔥 FREE FIRE HUB 🔥</h1>
-  <p class="sub">Boltix Labs · Welcome, {html.escape(name)}</p>
-  <div class="grid">
-{body}
-  </div>
-  <p class="note" id="note"></p>
-</div>
-<script>
-document.querySelectorAll('button[data-a]').forEach(function (b) {{
-  b.addEventListener('click', function () {{
-    var note = document.getElementById('note');
-    note.textContent = 'Opening…';
-    if (!window.TelegramWidget) {{ note.textContent = 'Widgets are not supported here.'; return; }}
-    TelegramWidget.request('act:' + b.getAttribute('data-a')).then(
-      function () {{ note.textContent = ''; }},
-      function () {{ note.textContent = 'Could not open. Try again.'; }}
-    );
-  }});
-}});
-</script>
-</body></html>"""
-
-
-async def send_widget(chat_id, html_source):
-    """Calls sendWidget with no width (full bubble width). Returns False if Telegram refuses it."""
-    payload = {"chat_id": chat_id, "html": html_source, "allow_queries": True}
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendWidget", json=payload)
-        data = resp.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        log.warning("sendWidget request failed: %s", exc)
-        return False
-    if not data.get("ok"):
-        log.warning("sendWidget refused: %s", data.get("description"))
-        return False
-    return True
-
-
-async def answer_widget_query(query_id, text=""):
-    """Answers a widget press. Telegram needs an answer within 15 seconds."""
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/answerWidgetQuery",
-                json={"widget_query_id": query_id, "data": text[:1024]},
-            )
-    except httpx.HTTPError as exc:
-        log.warning("answerWidgetQuery failed: %s", exc)
-
-
-async def send_widget_home(bot, chat_id, name):
-    """Menu picture first, then the full-width widget with the buttons under it.
-    Returns False if the widget is refused; the caller then sends the classic menu."""
-    await bot.send_photo(chat_id, FSInputFile(os.path.join(BASE, "menu.jpg")))
-    return await send_widget(chat_id, widget_menu_html(name))
-
-
-def _is_widget_query(update):
-    return bool((getattr(update, "model_extra", None) or {}).get("widget_query"))
-
-
-async def on_widget_query(update: Update, bot: Bot):
-    """Handles a press on a widget button and opens the matching screen."""
-    query = update.model_extra["widget_query"]
-    query_id = str(query.get("id", ""))
-    user_id = int((query.get("from") or {}).get("id", 0))
-    chat_id = int((query.get("chat") or {}).get("id", user_id))
-    action = str(query.get("data", ""))
-    await answer_widget_query(query_id)
-    if not user_id or not action.startswith("act:"):
-        return
-    action = action[4:]
-    s = SESS.setdefault(user_id, _new_session())
-    state = await is_member(bot, user_id)
-    if state is not True:
-        await send_screen(bot, chat_id, user_id, _join_screen(state, owner=is_sub_owner_id(user_id)))
-        return
-    if action == "uid":
-        s["await"] = "uid"
-        await send_screen(bot, chat_id, user_id, uid_prompt())
-    elif action == "weapon":
-        await send_screen(bot, chat_id, user_id, weapon_menu())
-    elif action == "sensi":
-        s["await"] = None
-        await send_screen(bot, chat_id, user_id, sensi_menu())
-    elif action == "ai":
-        s["await"] = "ai"
-        await send_screen(bot, chat_id, user_id, ai_prompt())
-    elif action == "ban":
-        s["await"] = "ban"
-        await send_screen(bot, chat_id, user_id, ban_prompt())
-    elif action == "hud":
-        s["await"] = None
-        s["hud"] = {"finger_count": None, "strongest_finger": None, "gloo_position": None}
-        await send_screen(bot, chat_id, user_id, hud_main(s["hud"]))
-    elif action == "topup" and not SUB_BOT_ID:
-        s["await"] = None
-        await send_screen(bot, chat_id, user_id, topup())
-
-
 def join():
     return Screen(
         "menu.jpg",
@@ -1512,27 +1369,273 @@ def _join_screen(member_state=None, owner=False):
     return Screen("menu.jpg", frame("JOIN TO CONTINUE", body), kb(*rows))
 
 
-async def send_screen(bot, chat_id, user_id, screen):
-    s = sess(user_id)
-    msg = await bot.send_photo(
+def _rich_button_style(label, button_type):
+    """Choose a native Telegram Rich Message button color from its action label."""
+    lower = str(label).lower()
+    if any(word in lower for word in ("delete", "remove", "ban", "reject", "cancel")):
+        return "danger"
+    if any(word in lower for word in ("✅", "joined", "verify", "confirm", "success", "paid")):
+        return "success"
+    if button_type == "callback_data" and any(word in lower for word in ("back", "help")):
+        return "link"
+    return "primary"
+
+
+def _rich_keyboard_html(markup):
+    """Convert this bot's existing callback/URL/WebApp keyboard rows to Rich buttons.
+
+    Keeping the original callback_data means all existing CallbackQuery handlers
+    continue to receive the same values; only the visual representation changes.
+    """
+    if not markup:
+        return ""
+    rows = getattr(markup, "inline_keyboard", None)
+    if not rows:
+        return ""
+
+    rendered_rows = []
+    for row in rows:
+        rendered_buttons = []
+        for button in row:
+            label = str(getattr(button, "text", "") or "Button")
+            callback_data = getattr(button, "callback_data", None)
+            button_url = getattr(button, "url", None)
+            web_app = getattr(button, "web_app", None)
+            web_app_url = getattr(web_app, "url", None) if web_app else None
+
+            if callback_data is not None:
+                kind = "callback_data"
+                attrs = f'data="{html.escape(str(callback_data), quote=True)}"'
+            elif button_url:
+                kind = "url"
+                attrs = f'url="{html.escape(str(button_url), quote=True)}"'
+            elif web_app_url:
+                kind = "web_app"
+                attrs = f'url="{html.escape(str(web_app_url), quote=True)}"'
+            else:
+                # Do not silently drop a future button type. Let the standard
+                # reply_markup path handle the complete keyboard instead.
+                return ""
+
+            style = _rich_button_style(label, kind)
+            rendered_buttons.append(
+                f'<tg-button type="{kind}" style="{style}" {attrs}>'
+                f'{html.escape(label)}</tg-button>'
+            )
+
+        if rendered_buttons:
+            rendered_rows.append(
+                '<tg-button-row align="center">' + "".join(rendered_buttons) + '</tg-button-row>'
+            )
+    return "\n".join(rendered_rows)
+
+
+def _rich_input(caption, markup, file_id=None, upload_field=None):
+    """Build InputRichMessage HTML and its attached-media descriptor."""
+    media_id = "screen_photo"
+    media_source = file_id or (f"attach://{upload_field}" if upload_field else None)
+    if not media_source:
+        raise ValueError("A Telegram photo file_id or upload is required for a rich screen.")
+
+    rich_html = f'<img src="tg://photo?id={media_id}"/>\n{caption}'
+    buttons_html = _rich_keyboard_html(markup)
+    reply_markup = None
+    if buttons_html:
+        rich_html += "\n" + buttons_html
+    elif markup:
+        # Fallback for a keyboard containing a button type not yet supported by
+        # this converter. Existing ordinary inline keyboards still work unchanged.
+        try:
+            if hasattr(markup, "model_dump"):
+                reply_markup = markup.model_dump(exclude_none=True, by_alias=True)
+            elif hasattr(markup, "dict"):
+                reply_markup = markup.dict(exclude_none=True, by_alias=True)
+            else:
+                reply_markup = markup
+        except Exception:
+            reply_markup = markup
+
+    rich = {
+        "html": rich_html,
+        "media": [{
+            "id": media_id,
+            "media": {"type": "photo", "media": media_source},
+        }],
+    }
+    return rich, reply_markup
+
+
+def _photo_file_id_from_message(message_data):
+    """Extract the reusable Telegram file_id from a returned rich photo block."""
+    found = []
+
+    def walk(value):
+        if isinstance(value, dict):
+            photo_sizes = value.get("photo")
+            if isinstance(photo_sizes, list):
+                for item in photo_sizes:
+                    if isinstance(item, dict) and item.get("file_id"):
+                        area = int(item.get("width", 0) or 0) * int(item.get("height", 0) or 0)
+                        found.append((area, item["file_id"]))
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(message_data)
+    return max(found, default=(0, None), key=lambda item: item[0])[1]
+
+
+async def _telegram_rich_request(bot, method, chat_id, caption, markup,
+                                 message_id=None, image_path=None,
+                                 image_bytes=None, filename="screen.jpg", file_id=None):
+    """Call sendRichMessage/editMessageText directly, independent of aiogram's API schema."""
+    upload_field = "rich_photo_upload" if file_id is None else None
+    rich, reply_markup = _rich_input(
+        caption, markup, file_id=file_id, upload_field=upload_field
+    )
+    data = {
+        "chat_id": str(chat_id),
+        "rich_message": json.dumps(rich, ensure_ascii=False),
+    }
+    if message_id is not None:
+        data["message_id"] = str(message_id)
+    if reply_markup:
+        if hasattr(reply_markup, "model_dump"):
+            reply_markup = reply_markup.model_dump(exclude_none=True, by_alias=True)
+        elif hasattr(reply_markup, "dict"):
+            reply_markup = reply_markup.dict(exclude_none=True, by_alias=True)
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
+    files = None
+    if file_id is None:
+        if image_bytes is None:
+            if not image_path:
+                raise ValueError("A local image path, image bytes, or Telegram file_id is required.")
+            with open(image_path, "rb") as stream:
+                image_bytes = stream.read()
+            filename = os.path.basename(image_path)
+        files = {
+            upload_field: (filename, image_bytes, "image/jpeg"),
+        }
+
+    endpoint = f"https://api.telegram.org/bot{bot.token}/{method}"
+    async with httpx.AsyncClient(timeout=45) as client:
+        response = await client.post(endpoint, data=data, files=files)
+    try:
+        payload = response.json()
+    except ValueError:
+        raise RuntimeError(f"Telegram {method} returned HTTP {response.status_code} with an invalid response.")
+    if not response.is_success or not payload.get("ok"):
+        description = payload.get("description") or f"HTTP {response.status_code}"
+        if "method not found" in description.lower() or "unknown method" in description.lower():
+            global _RICH_API_UNAVAILABLE
+            _RICH_API_UNAVAILABLE = True
+        raise RuntimeError(f"Telegram {method} failed: {description}")
+    return payload.get("result") or {}
+
+
+async def _send_legacy_screen(bot, chat_id, screen):
+    return await bot.send_photo(
         chat_id,
         FSInputFile(os.path.join(BASE, screen.image)),
         caption=screen.caption,
         reply_markup=screen.markup,
     )
+
+
+async def _replace_rich_with_legacy_screen(bot, chat_id, user_id, screen, old_message_id=None):
+    """Safe fallback if Telegram rejects a rich edit on an already-sent rich message."""
+    s = sess(user_id)
+    msg = await _send_legacy_screen(bot, chat_id, screen)
     s["ui_chat_id"] = chat_id
     s["ui_message_id"] = msg.message_id
     s["ui_image"] = screen.image
+    s["ui_rich"] = False
+    s.pop("ui_rich_file_id", None)
+    if old_message_id and old_message_id != msg.message_id:
+        try:
+            await bot.delete_message(chat_id, old_message_id)
+        except TelegramAPIError:
+            pass
+    return msg
+
+
+async def send_screen(bot, chat_id, user_id, screen):
+    s = sess(user_id)
+    msg = None
+    if RICH_MESSAGES_ENABLED and not _RICH_API_UNAVAILABLE:
+        try:
+            result = await _telegram_rich_request(
+                bot, "sendRichMessage", chat_id, screen.caption, screen.markup,
+                image_path=os.path.join(BASE, screen.image),
+            )
+            msg_id = result.get("message_id")
+            if not msg_id:
+                raise RuntimeError("Telegram sendRichMessage returned no message_id.")
+            s["ui_chat_id"] = chat_id
+            s["ui_message_id"] = int(msg_id)
+            s["ui_image"] = screen.image
+            s["ui_rich"] = True
+            s["ui_rich_file_id"] = _photo_file_id_from_message(result)
+            return SimpleNamespace(message_id=int(msg_id))
+        except Exception as exc:
+            log.warning("Rich Message send failed; using the standard photo layout: %s", exc)
+
+    msg = await _send_legacy_screen(bot, chat_id, screen)
+    s["ui_chat_id"] = chat_id
+    s["ui_message_id"] = msg.message_id
+    s["ui_image"] = screen.image
+    s["ui_rich"] = False
+    s.pop("ui_rich_file_id", None)
     return msg
 
 
 async def edit_screen(bot, chat_id, user_id, screen):
-    """Hoshigami-style update: edit the current photo/caption and keyboard in place."""
+    """Update the current screen, preferring Telegram Rich Messages with attached photos."""
     s = sess(user_id)
     message_id = s.get("ui_message_id")
     if not message_id or s.get("ui_chat_id") != chat_id:
         return await send_screen(bot, chat_id, user_id, screen)
 
+    if RICH_MESSAGES_ENABLED and not _RICH_API_UNAVAILABLE:
+        if not s.get("ui_rich"):
+            # Migrate an older photo/caption screen once, so the first interaction
+            # after deployment switches the existing UI to Rich Messages.
+            try:
+                await bot.delete_message(chat_id, message_id)
+                message_id = None
+            except TelegramAPIError:
+                pass
+            if message_id is None:
+                return await send_screen(bot, chat_id, user_id, screen)
+
+        try:
+            same_image = s.get("ui_image") == screen.image and s.get("ui_rich_file_id")
+            result = await _telegram_rich_request(
+                bot, "editMessageText", chat_id, screen.caption, screen.markup,
+                message_id=message_id,
+                image_path=None if same_image else os.path.join(BASE, screen.image),
+                file_id=s.get("ui_rich_file_id") if same_image else None,
+            )
+            s["ui_image"] = screen.image
+            s["ui_rich"] = True
+            new_file_id = _photo_file_id_from_message(result)
+            if new_file_id:
+                s["ui_rich_file_id"] = new_file_id
+            elif not same_image:
+                s.pop("ui_rich_file_id", None)
+            return
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            log.warning("Rich Message edit failed for %s; replacing with standard photo: %s", message_id, exc)
+            return await _replace_rich_with_legacy_screen(
+                bot, chat_id, user_id, screen, old_message_id=message_id
+            )
+
+    # Original Bot API photo/caption editing remains as the compatibility path.
     try:
         if s.get("ui_image") == screen.image:
             await bot.edit_message_caption(
@@ -1555,7 +1658,6 @@ async def edit_screen(bot, chat_id, user_id, screen):
             )
         s["ui_image"] = screen.image
     except TelegramAPIError as exc:
-        # A stale/deleted Telegram message should not stop the bot. Re-create only then.
         if "message is not modified" in str(exc).lower():
             return
         log.warning("Could not edit UI message %s: %s; sending a replacement", message_id, exc)
@@ -1688,8 +1790,49 @@ async def edit_card_photo(bot, chat_id, user_id, card, caption, markup, filename
     message_id = s.get("ui_message_id")
     if not message_id or s.get("ui_chat_id") != chat_id:
         return
+
+    card_bytes = card.getvalue()
+    if RICH_MESSAGES_ENABLED and not _RICH_API_UNAVAILABLE and s.get("ui_rich"):
+        try:
+            result = await _telegram_rich_request(
+                bot, "editMessageText", chat_id, caption, markup,
+                message_id=message_id,
+                image_bytes=card_bytes,
+                filename=filename,
+            )
+            s["ui_image"] = "__generated_card__"
+            s["ui_rich"] = True
+            new_file_id = _photo_file_id_from_message(result)
+            if new_file_id:
+                s["ui_rich_file_id"] = new_file_id
+            return
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            log.warning("Rich Message card edit failed; replacing with a standard photo: %s", exc)
+            try:
+                msg = await bot.send_photo(
+                    chat_id,
+                    BufferedInputFile(card_bytes, filename=filename),
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=markup,
+                )
+                s["ui_chat_id"] = chat_id
+                s["ui_message_id"] = msg.message_id
+                s["ui_image"] = "__generated_card__"
+                s["ui_rich"] = False
+                s.pop("ui_rich_file_id", None)
+                try:
+                    await bot.delete_message(chat_id, message_id)
+                except TelegramAPIError:
+                    pass
+                return
+            except TelegramAPIError as fallback_exc:
+                log.warning("Legacy card fallback failed: %s", fallback_exc)
+
     media = InputMediaPhoto(
-        media=BufferedInputFile(card.getvalue(), filename=filename),
+        media=BufferedInputFile(card_bytes, filename=filename),
         caption=caption,
         parse_mode=ParseMode.HTML,
     )
@@ -1701,11 +1844,11 @@ async def edit_card_photo(bot, chat_id, user_id, card, caption, markup, filename
             reply_markup=markup,
         )
         s["ui_image"] = "__generated_hud__"
+        s["ui_rich"] = False
     except TelegramAPIError as exc:
         log.warning("Could not replace screen with generated card: %s", exc)
         fallback = fallback_screen or hud_main(s["hud"], "Couldn't update this screen. Tap Generate HUD to retry.")
         await send_screen(bot, chat_id, user_id, fallback)
-
 
 async def enforce_access(bot, chat_id, user_id):
     """Check both channels on every command, callback, and user text response."""
@@ -2643,13 +2786,88 @@ def _photo_file_id(message):
 
 
 async def show_uid_card(bot, chat, user_id, uid, raw):
-    """Show the profile card. Reuses the Telegram copy of the card when possible, so Back is instant."""
+    """Show the profile card, using the same rich-photo message when enabled."""
     s = sess(user_id)
     caption = frame("PLAYER PROFILE", f"UID: <code>{esc(uid)}</code>")
     markup = uid_result_kb()
     message_id = s.get("ui_message_id")
     same_screen = bool(message_id) and s.get("ui_chat_id") == chat
     cached = s.get("uid_card") or {}
+
+    if same_screen and s.get("ui_rich") and RICH_MESSAGES_ENABLED and not _RICH_API_UNAVAILABLE:
+        if cached.get("uid") == uid and cached.get("file_id"):
+            try:
+                result = await _telegram_rich_request(
+                    bot, "editMessageText", chat, caption, markup,
+                    message_id=message_id, file_id=cached["file_id"],
+                )
+                s["ui_image"] = "__uid_card__"
+                s["ui_rich_file_id"] = _photo_file_id_from_message(result) or cached["file_id"]
+                return
+            except Exception as exc:
+                if "message is not modified" in str(exc).lower():
+                    return
+                log.warning("Could not reuse cached rich profile card: %s", exc)
+                try:
+                    msg = await bot.send_photo(
+                        chat, cached["file_id"], caption=caption,
+                        parse_mode=ParseMode.HTML, reply_markup=markup,
+                    )
+                    s["ui_message_id"] = msg.message_id
+                    s["ui_image"] = "__uid_card__"
+                    s["ui_rich"] = False
+                    s.pop("ui_rich_file_id", None)
+                    try:
+                        await bot.delete_message(chat, message_id)
+                    except TelegramAPIError:
+                        pass
+                    return
+                except TelegramAPIError as fallback_exc:
+                    log.warning("Legacy cached-card fallback failed: %s", fallback_exc)
+
+        card = await asyncio.to_thread(profile_card, raw, uid)
+        try:
+            result = await _telegram_rich_request(
+                bot, "editMessageText", chat, caption, markup,
+                message_id=message_id, image_bytes=card.getvalue(),
+                filename="uid-card.jpg",
+            )
+            file_id = _photo_file_id_from_message(result)
+            if file_id:
+                s["uid_card"] = {"uid": uid, "file_id": file_id}
+                s["ui_rich_file_id"] = file_id
+            else:
+                s.pop("ui_rich_file_id", None)
+            s["ui_image"] = "__uid_card__"
+            return
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            log.warning("Could not edit rich screen with profile card: %s", exc)
+            try:
+                msg = await bot.send_photo(
+                    chat,
+                    BufferedInputFile(card.getvalue(), filename="uid-card.jpg"),
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=markup,
+                )
+                s["ui_message_id"] = msg.message_id
+                s["ui_image"] = "__uid_card__"
+                s["ui_rich"] = False
+                s.pop("ui_rich_file_id", None)
+                file_id = _photo_file_id(msg)
+                if file_id:
+                    s["uid_card"] = {"uid": uid, "file_id": file_id}
+                try:
+                    await bot.delete_message(chat, message_id)
+                except TelegramAPIError:
+                    pass
+                return
+            except TelegramAPIError as fallback_exc:
+                log.warning("Legacy profile-card fallback failed: %s", fallback_exc)
+
+    # Backwards-compatible path for older photo/caption sessions or disabled Rich Messages.
     if same_screen and cached.get("uid") == uid and cached.get("file_id"):
         try:
             await bot.edit_message_media(
@@ -2678,7 +2896,6 @@ async def show_uid_card(bot, chat, user_id, uid, raw):
         except TelegramAPIError as exc:
             log.warning("Could not replace screen with the profile card: %s", exc)
     await send_screen(bot, chat, user_id, profile(uid, format_profile(raw)))
-
 
 async def handle_uid_extra(cb, s, data):
     chat, user_id, bot = cb.message.chat.id, cb.from_user.id, cb.bot
@@ -4139,9 +4356,6 @@ async def cmd_start(message: Message):
     # /start opens a fresh session; /menu and /help clear the active prompt as well.
     SESS[user_id] = _new_session()
     state = await is_member(message.bot, user_id)
-    if state is True and WIDGET_MENU and message.chat.type == "private":
-        if await send_widget_home(message.bot, message.chat.id, message.from_user.first_name or "player"):
-            return
     screen = menu(message.from_user.first_name or "player") if state is True else _join_screen(state, owner=is_sub_owner_id(user_id))
     await send_screen(message.bot, message.chat.id, user_id, screen)
 
@@ -4487,9 +4701,8 @@ def main():
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
-    dp.update.register(on_widget_query, _is_widget_query)  # widget button presses
     dp.update.outer_middleware(SessionPersistenceMiddleware())
-    updates = list(dict.fromkeys(list(dp.resolve_used_update_types()) + ["widget_query"]))
+    updates = dp.resolve_used_update_types()
 
     if SUB_BOT_ID or not PUBLIC_URL:
         log.info("Polling mode (sub bot or no PUBLIC_URL).")
